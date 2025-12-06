@@ -12,7 +12,6 @@
 
 #define MAX_PLATFORMS 30
 #define MAX_COINS     40
-// #define MAX_TRAPS     20 // ELIMINADO: Ya no necesitamos trampas/picos
 #define MAX_SLIMES    10
 #define MAX_LEVELS    3
 
@@ -31,6 +30,11 @@
 // CONSTANTES DE PUERTA
 #define DOOR_W        32
 #define DOOR_H        48 
+
+// ===> ANIMACIÓN AÑADIDA <===
+#define PLAYER_FRAME_WIDTH 16.0f
+#define ANIMATION_SPEED    0.1f // Tiempo que dura cada frame de animación (en segundos)
+#define WALK_FRAMES        4    // Asumiendo que los primeros 4 frames son para caminar
 
 // ---------------------------------------------------------------------------
 //   GENERADOR DE ONDA DE SONIDO 
@@ -74,14 +78,6 @@ typedef struct {
     bool collected;
 } Coin;
 
-/*
-// ESTRUCTURA TRAP ELIMINADA
-typedef struct {
-    Rectangle rect; 
-    bool isActive;
-} Trap;
-*/
-
 typedef struct {
     Rectangle rect;
     bool isLocked;
@@ -106,13 +102,17 @@ int currentLevel = 1;
 int score = 0;
 bool isGravityInverted = false; 
 
+// ===> VARIABLES DE ANIMACIÓN <===
+float animTimer = 0.0f;
+int currentFrame = 0;
+float playerFacing = 1.0f; // 1.0f = Derecha, -1.0f = Izquierda
+
 // Texturas y Fuentes (RUTAS ABSOLUTAS)
 Texture2D texKnight;
 Texture2D texCoin;
 Texture2D texPlatforms;
 Texture2D texSlimePurple;
 Texture2D texDoor; 
-// Texture2D texTrap; // ELIMINADO
 Font gameFont;
 
 // Rectángulos de origen para el sprite sheet
@@ -120,7 +120,6 @@ Rectangle texRecPlayer = { 0, 0, 16, 28 };
 Rectangle texRecCoin = { 0, 0, 16, 16 };   
 Rectangle texRecSlimePurple = { 0, 0, 32, 28 }; 
 Rectangle texRecPlatform = { 0, 0, 32, 16 }; 
-// Rectangle texRecTrap = { 0, 0, 32, 16 }; // ELIMINADO
 
 // Sonidos
 Sound fxCoin;
@@ -144,19 +143,17 @@ void ResolveHorizontalCollisions(Rectangle *player, Platform platforms[], int pl
 void UpdatePlatforms(Platform platforms[], int platformCount, float dt);
 void UpdateSlimes(Slime slimes[], int slimeCount, float dt);
 void CheckCoinCollection(Rectangle player, Coin coins[], int coinCount, int *score);
-// bool CheckTrapCollision(Rectangle player, Trap traps[], int trapCount); // ELIMINADO
 bool CheckSlimeCollision(Rectangle player, Slime slimes[], int slimeCount);
 void LoadLevel(int levelId, Rectangle *player, float *velY,
                Platform platforms[], int *platformCount,
                Coin coins[], int *coinCount,
-               // Trap traps[], int *trapCount, // ELIMINADO
                Slime slimes[], int *slimeCount,
                Door *door); 
 
 // ---------------------------------------------------------------------------
 //                     DEFINICIONES DE FUNCIONES
 // ---------------------------------------------------------------------------
-
+// Las funciones auxiliares (GetPlatformColor, CheckCollisionRectEx, etc.) se mantienen igual.
 Color GetPlatformColor(int level) {
     switch (level) {
         case 1: return (Color){139, 69, 19, 255};
@@ -278,16 +275,6 @@ void CheckCoinCollection(Rectangle player, Coin coins[], int coinCount, int *sco
     }
 }
 
-/*
-// FUNCIÓN ELIMINADA: Ya no se usan trampas/picos
-bool CheckTrapCollision(Rectangle player, Trap traps[], int trapCount) {
-    for (int i = 0; i < trapCount; i++)
-        if (traps[i].isActive && CheckCollisionRectEx(player, traps[i].rect))
-            return true;
-    return false;
-}
-*/
-
 bool CheckSlimeCollision(Rectangle player, Slime slimes[], int slimeCount) {
     for (int i = 0; i < slimeCount; i++)
         if (slimes[i].isActive && CheckCollisionRectEx(player, slimes[i].rect))
@@ -300,13 +287,12 @@ bool CheckSlimeCollision(Rectangle player, Slime slimes[], int slimeCount) {
 // ---------------------------------------------------------------------------
 void LoadAssets(void)
 {
-    // Carga de Texturas (ASUME que las rutas son correctas, si fallan aquí está el error)
+    // Carga de Texturas (Asegúrate de que las rutas sean correctas)
     texKnight = LoadTexture("sprites/knight.png");
     texCoin = LoadTexture("sprites/coin.png");
     texPlatforms = LoadTexture("sprites/platforms.png");
     texSlimePurple = LoadTexture("sprites/slime_purple.png");
     texDoor = LoadTexture("sprites/door.png"); 
-    // texTrap = LoadTexture("sprites/spikes.png"); // ELIMINADO
 
     // Carga de Fuente
     gameFont = LoadFont("fonts/PixelOperator8-Bold.ttf");
@@ -335,7 +321,6 @@ void UnloadAssets(void)
     UnloadTexture(texPlatforms);
     UnloadTexture(texSlimePurple);
     UnloadTexture(texDoor);
-    // UnloadTexture(texTrap); // ELIMINADO
     UnloadFont(gameFont);
 
     if (IsAudioDeviceReady()) {
@@ -353,13 +338,11 @@ void UnloadAssets(void)
 void LoadLevel(int levelId, Rectangle *player, float *velY,
                Platform platforms[], int *platformCount,
                Coin coins[], int *coinCount,
-               // Trap traps[], int *trapCount, // ELIMINADO
                Slime slimes[], int *slimeCount,
                Door *door)
 {
     *platformCount = 0;
     *coinCount     = 0;
-    // *trapCount     = 0; // ELIMINADO
     *slimeCount    = 0;
     *velY          = 0.0f;
     *player = (Rectangle){ 0, 0, PLAYER_SIZE_W, PLAYER_SIZE_H };
@@ -371,6 +354,11 @@ void LoadLevel(int levelId, Rectangle *player, float *velY,
     float groundY = 500.0f;
     float ceilingY = 40.0f;
     float coinOffset = COIN_SIZE / 2.0f;
+
+    // Reiniciar animación al cargar nivel
+    animTimer = 0.0f;
+    currentFrame = 0;
+    playerFacing = 1.0f;
 
     switch (levelId)
     {
@@ -393,7 +381,7 @@ void LoadLevel(int levelId, Rectangle *player, float *velY,
             coins[(*coinCount)++] = (Coin){ { 500.0f, 200.0f - coinOffset }, false }; 
             coins[(*coinCount)++] = (Coin){ { 850.0f, groundY - 40.0f - coinOffset }, false }; 
             
-            // Slimes (Sin trampas/picos)
+            // Slimes 
             slimes[(*slimeCount)++] = (Slime){ { 650, groundY - SLIME_SIZE_H, SLIME_SIZE_W, SLIME_SIZE_H }, SLIME_PURPLE, 70.0f, {650.0f, groundY - SLIME_SIZE_H}, 100.0f, 1, true };
             
             break;
@@ -488,12 +476,10 @@ int main(void)
 
     Platform platforms[MAX_PLATFORMS];
     Coin coins[MAX_COINS];
-    // Trap traps[MAX_TRAPS]; // ELIMINADO
     Slime slimes[MAX_SLIMES];
 
     int platformCount = 0;
     int coinCount = 0;
-    // int trapCount = 0; // ELIMINADO
     int slimeCount = 0;
     
     isGravityInverted = false;
@@ -501,13 +487,13 @@ int main(void)
     LoadLevel(currentLevel, &player, &velY,
               platforms, &platformCount,
               coins, &coinCount,
-              // traps, &trapCount, // ELIMINADO
               slimes, &slimeCount,
               &levelDoor);
 
     while (!WindowShouldClose())
     {
         float dt = GetFrameTime();
+        bool isMoving = false; // Variable para saber si el jugador está caminando
 
         switch (gamestate)
         {
@@ -520,9 +506,19 @@ int main(void)
         case PLAYING:
         { 
             float moveSpeed = 200.0f; 
-            if (IsKeyDown(KEY_LEFT))  player.x -= moveSpeed * dt;
-            if (IsKeyDown(KEY_RIGHT)) player.x += moveSpeed * dt;
-
+            
+            // --- Lógica de Movimiento y Orientación ---
+            if (IsKeyDown(KEY_LEFT)) {
+                player.x -= moveSpeed * dt;
+                playerFacing = -1.0f; // Mirando a la izquierda
+                isMoving = true;
+            }
+            if (IsKeyDown(KEY_RIGHT)) {
+                player.x += moveSpeed * dt;
+                playerFacing = 1.0f; // Mirando a la derecha
+                isMoving = true;
+            }
+            
             bool onGround = !isGravityInverted ?
                 IsTouchingSurface(player, platforms, platformCount, false) :
                 IsTouchingSurface(player, platforms, platformCount, true);
@@ -539,6 +535,27 @@ int main(void)
             if (onGround && IsKeyPressed(KEY_UP))
                 isGravityInverted = !isGravityInverted;
 
+            // ===> Lógica de Animación (Update) <===
+            if (isMoving && onGround)
+            {
+                animTimer += dt;
+                if (animTimer >= ANIMATION_SPEED)
+                {
+                    // Cicla los frames de caminar (0, 1, 2, 3)
+                    currentFrame = (currentFrame + 1) % WALK_FRAMES; 
+                    animTimer = 0.0f;
+                }
+            }
+            else
+            {
+                // Reposo (Idle) o Salto/Caída
+                currentFrame = 0; 
+                animTimer = 0.0f;
+            }
+            
+            // Actualizar el rectángulo de origen de la textura del jugador (Frame X)
+            texRecPlayer.x = currentFrame * PLAYER_FRAME_WIDTH;
+            
             // ----------- Física vertical -----------
             velY += (isGravityInverted ? -gravity : gravity) * dt;
             player.y += velY * dt;
@@ -555,16 +572,15 @@ int main(void)
             CheckCoinCollection(player, coins, coinCount, &score);
 
             // ----------- Colisiones mortales -----------
-            // if (CheckTrapCollision(player, traps, trapCount) || // ELIMINADO
             if (CheckSlimeCollision(player, slimes, slimeCount))
             {
                 PlaySound(fxHurt);
                 gamestate = GAMEOVER;
             }
 
-            // ----------- Game Over por volar fuera de límites -----------
-            if (isGravityInverted && player.y + player.height < 0 || 
-                !isGravityInverted && player.y > SCREEN_H)          
+            // ===> Game Over por volar fuera de límites (CORREGIDO) <===
+            if ((isGravityInverted && (player.y + player.height < 0)) || // Si gravedad invertida Y sales por el TECHO
+                (!isGravityInverted && (player.y > SCREEN_H)))          // O si gravedad normal Y sales por el SUELO
             {
                  PlaySound(fxHurt);
                  gamestate = GAMEOVER;
@@ -585,7 +601,6 @@ int main(void)
                     LoadLevel(currentLevel, &player, &velY,
                               platforms, &platformCount,
                               coins, &coinCount,
-                              // traps, &trapCount, // ELIMINADO
                               slimes, &slimeCount,
                               &levelDoor);
                 }
@@ -641,7 +656,7 @@ int main(void)
 
         case PLAYING:
         { 
-            // Dibujar plataformas (CORRECCIÓN DE ESTIRAMIENTO)
+            // Dibujar plataformas 
             Rectangle sourcePlat = { 0, 0, PLATFORM_TILE_W, PLATFORM_TILE_H }; 
             for (int i = 0; i < platformCount; i++)
             {
@@ -680,8 +695,14 @@ int main(void)
                     DrawTexturePro(texSlimePurple, texRecSlimePurple, slimes[i].rect, (Vector2){0}, 0.0f, WHITE);
 
 
-            // Dibujar jugador (ESCALADO)
-            DrawTexturePro(texKnight, texRecPlayer, player, (Vector2){0}, 0.0f, WHITE);
+            // ===> Dibujar jugador con animación y flip (ESCALADO) <===
+            Rectangle destRecPlayer = player;
+            
+            // Aplicar 'flip': Multiplicamos el ancho del sprite de origen por la dirección
+            Rectangle finalSourceRec = texRecPlayer;
+            finalSourceRec.width *= playerFacing; 
+            
+            DrawTexturePro(texKnight, finalSourceRec, destRecPlayer, (Vector2){0}, 0.0f, WHITE);
             
             // Dibujar Puerta (cerrada o abierta)
             Rectangle doorSource = levelDoor.isLocked ? (Rectangle){0, 0, 32, 48} : (Rectangle){32, 0, 32, 48}; 
