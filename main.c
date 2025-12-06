@@ -1,5 +1,4 @@
 #include "raylib.h"
-
 #include <stdbool.h>
 #include <math.h>
 #include <stdio.h>
@@ -15,26 +14,42 @@
 #define MAX_SLIMES    10
 #define MAX_LEVELS    3
 
-// TAMAÑOS ESCALADOS 
+// ===> TAMAÑOS DE TEXTURA (SOURCE) <===
+// Asumimos que tus dibujos son de 32x32 en el archivo
+#define SPRITE_SIZE_SRC 32 
+
+// ===> TAMAÑOS EN PANTALLA (DESTINATION) <===
 #define PLAYER_SCALE  2.0f
-#define PLAYER_SIZE_W (int)(16 * PLAYER_SCALE)
-#define PLAYER_SIZE_H (int)(28 * PLAYER_SCALE)
-#define COIN_SIZE     32.0f 
-#define SLIME_SIZE_W  (int)(32 * PLAYER_SCALE)
-#define SLIME_SIZE_H  (int)(28 * PLAYER_SCALE)
+// El jugador se verá de 64x64 aprox (ajustado al bounding box)
+#define PLAYER_SIZE_W (int)(20 * PLAYER_SCALE) // Ancho de colisión un poco menor al sprite
+#define PLAYER_SIZE_H (int)(30 * PLAYER_SCALE)
 
-// TAMAÑO BASE DEL SPRITE DE PLATAFORMA 
+// Moneda más grande (48x48 en pantalla)
+#define COIN_SCALE    1.5f 
+#define COIN_SIZE     (SPRITE_SIZE_SRC * COIN_SCALE)
+
+// Slimes
+#define SLIME_SCALE   2.0f
+#define SLIME_W_DRAW  (SPRITE_SIZE_SRC * SLIME_SCALE)
+#define SLIME_H_DRAW  (SPRITE_SIZE_SRC * SLIME_SCALE)
+// Caja de colisión del slime (un poco más pequeña que el dibujo)
+#define SLIME_HITBOX_W (int)(24 * SLIME_SCALE)
+#define SLIME_HITBOX_H (int)(20 * SLIME_SCALE)
+
 #define PLATFORM_TILE_W 32.0f
-#define PLATFORM_TILE_H 16.0f
+#define PLATFORM_TILE_H 32.0f // Ajustado a 32 si usas tiles cuadrados
 
-// CONSTANTES DE PUERTA
 #define DOOR_W        32
 #define DOOR_H        48 
 
-// ===> ANIMACIÓN AÑADIDA <===
-#define PLAYER_FRAME_WIDTH 16.0f
-#define ANIMATION_SPEED    0.1f // Tiempo que dura cada frame de animación (en segundos)
-#define WALK_FRAMES        4    // Asumiendo que los primeros 4 frames son para caminar
+// ===> CONFIGURACIÓN DE ANIMACIÓN <===
+#define ANIM_SPEED_PLAYER 0.1f
+#define ANIM_SPEED_SLIME  0.15f
+#define ANIM_SPEED_COIN   0.1f
+
+#define PLAYER_FRAMES 4
+#define SLIME_FRAMES  4  // Asumiendo que el slime tiene 4 cuadros de movimiento
+#define COIN_FRAMES   4  // Asumiendo que la moneda gira en 4 cuadros
 
 // ---------------------------------------------------------------------------
 //   GENERADOR DE ONDA DE SONIDO 
@@ -76,6 +91,9 @@ typedef struct {
 typedef struct {
     Vector2 center;
     bool collected;
+    // Animación Moneda
+    int currentFrame;
+    float animTimer;
 } Coin;
 
 typedef struct {
@@ -86,13 +104,16 @@ typedef struct {
 typedef enum { SLIME_GREEN, SLIME_PURPLE } SlimeType;
 
 typedef struct {
-    Rectangle rect;
+    Rectangle rect; // Esta es la HITBOX (Colisión)
     SlimeType type;
     float speed;
     Vector2 startPos;
     float range;
     int dir;
     bool isActive;
+    // Animación Slime
+    int currentFrame;
+    float animTimer;
 } Slime;
 
 typedef enum { MENU, PLAYING, GAMEOVER, VICTORY } GameState;
@@ -102,12 +123,12 @@ int currentLevel = 1;
 int score = 0;
 bool isGravityInverted = false; 
 
-// ===> VARIABLES DE ANIMACIÓN <===
-float animTimer = 0.0f;
-int currentFrame = 0;
-float playerFacing = 1.0f; // 1.0f = Derecha, -1.0f = Izquierda
+// ===> VARIABLES DE ANIMACIÓN JUGADOR <===
+float animTimerPlayer = 0.0f;
+int currentFramePlayer = 0;
+float playerFacing = 1.0f; 
 
-// Texturas y Fuentes (RUTAS ABSOLUTAS)
+// Texturas
 Texture2D texKnight;
 Texture2D texCoin;
 Texture2D texPlatforms;
@@ -115,10 +136,10 @@ Texture2D texSlimePurple;
 Texture2D texDoor; 
 Font gameFont;
 
-// Rectángulos de origen para el sprite sheet
-Rectangle texRecPlayer = { 0, 0, 16, 28 }; 
-Rectangle texRecCoin = { 0, 0, 16, 16 };   
-Rectangle texRecSlimePurple = { 0, 0, 32, 28 }; 
+// Rectángulos BASE (Source)
+Rectangle texRecPlayer = { 0, 0, SPRITE_SIZE_SRC, SPRITE_SIZE_SRC }; 
+Rectangle texRecCoin   = { 0, 0, SPRITE_SIZE_SRC, SPRITE_SIZE_SRC };   
+Rectangle texRecSlime  = { 0, 0, SPRITE_SIZE_SRC, SPRITE_SIZE_SRC }; 
 Rectangle texRecPlatform = { 0, 0, 32, 16 }; 
 
 // Sonidos
@@ -127,11 +148,10 @@ Sound fxExplosion;
 Sound fxHurt;
 Sound fxJump;
 
-// Puerta del nivel actual
 Door levelDoor; 
 
 // ---------------------------------------------------------------------------
-// PROTOTIPOS DE FUNCIONES 
+// PROTOTIPOS
 // ---------------------------------------------------------------------------
 void LoadAssets(void);
 void UnloadAssets(void);
@@ -142,6 +162,7 @@ void ResolveVerticalCollisions(Rectangle *player, float *velY, Platform platform
 void ResolveHorizontalCollisions(Rectangle *player, Platform platforms[], int platformCount);
 void UpdatePlatforms(Platform platforms[], int platformCount, float dt);
 void UpdateSlimes(Slime slimes[], int slimeCount, float dt);
+void UpdateCoinsAnim(Coin coins[], int coinCount, float dt); // NUEVA
 void CheckCoinCollection(Rectangle player, Coin coins[], int coinCount, int *score);
 bool CheckSlimeCollision(Rectangle player, Slime slimes[], int slimeCount);
 void LoadLevel(int levelId, Rectangle *player, float *velY,
@@ -153,7 +174,6 @@ void LoadLevel(int levelId, Rectangle *player, float *velY,
 // ---------------------------------------------------------------------------
 //                     DEFINICIONES DE FUNCIONES
 // ---------------------------------------------------------------------------
-// Las funciones auxiliares (GetPlatformColor, CheckCollisionRectEx, etc.) se mantienen igual.
 Color GetPlatformColor(int level) {
     switch (level) {
         case 1: return (Color){139, 69, 19, 255};
@@ -250,14 +270,38 @@ void UpdateSlimes(Slime slimes[], int slimeCount, float dt)
     for (int i = 0; i < slimeCount; i++) {
         if (!slimes[i].isActive) continue;
 
+        // Movimiento
         slimes[i].rect.x += slimes[i].dir * slimes[i].speed * dt;
-
         float dx = slimes[i].rect.x - slimes[i].startPos.x;
-        float dist = fabsf(dx);
-
-        if (dist >= slimes[i].range) {
+        if (fabsf(dx) >= slimes[i].range) {
             slimes[i].dir *= -1;
             slimes[i].startPos.x = slimes[i].rect.x;
+        }
+
+        // Animación
+        slimes[i].animTimer += dt;
+        if (slimes[i].animTimer >= ANIM_SPEED_SLIME) {
+            slimes[i].animTimer = 0.0f;
+            slimes[i].currentFrame++;
+            if (slimes[i].currentFrame >= SLIME_FRAMES) {
+                slimes[i].currentFrame = 0;
+            }
+        }
+    }
+}
+
+void UpdateCoinsAnim(Coin coins[], int coinCount, float dt)
+{
+    for (int i = 0; i < coinCount; i++) {
+        if (coins[i].collected) continue;
+        
+        coins[i].animTimer += dt;
+        if (coins[i].animTimer >= ANIM_SPEED_COIN) {
+            coins[i].animTimer = 0.0f;
+            coins[i].currentFrame++;
+            if (coins[i].currentFrame >= COIN_FRAMES) {
+                coins[i].currentFrame = 0;
+            }
         }
     }
 }
@@ -266,7 +310,8 @@ void CheckCoinCollection(Rectangle player, Coin coins[], int coinCount, int *sco
 {
     for (int i = 0; i < coinCount; i++) {
         if (!coins[i].collected) {
-            if (CheckCollisionCircleRec(coins[i].center, COIN_SIZE / 2, player)) {
+            // Ajustamos la colisión considerando el nuevo tamaño visual
+            if (CheckCollisionCircleRec(coins[i].center, COIN_SIZE / 3, player)) {
                 coins[i].collected = true;
                 (*score)++;
                 PlaySound(fxCoin);
@@ -283,18 +328,24 @@ bool CheckSlimeCollision(Rectangle player, Slime slimes[], int slimeCount) {
 }
 
 // ---------------------------------------------------------------------------
-//                   CARGA Y DESCARGA DE ASSETS (RUTAS ABSOLUTAS)
+//                   CARGA Y DESCARGA DE ASSETS
 // ---------------------------------------------------------------------------
 void LoadAssets(void)
 {
-    // Carga de Texturas (Asegúrate de que las rutas sean correctas)
+    // Carga de Texturas 
     texKnight = LoadTexture("sprites/knight.png");
     texCoin = LoadTexture("sprites/coin.png");
     texPlatforms = LoadTexture("sprites/platforms.png");
     texSlimePurple = LoadTexture("sprites/slime_purple.png");
     texDoor = LoadTexture("sprites/door.png"); 
+    
+    // ===> ESTO SOLUCIONA LO BORROSO Y EL "SANGRADO" DE PIXELES <===
+    SetTextureFilter(texKnight, TEXTURE_FILTER_POINT);
+    SetTextureFilter(texCoin, TEXTURE_FILTER_POINT);
+    SetTextureFilter(texSlimePurple, TEXTURE_FILTER_POINT);
+    SetTextureFilter(texPlatforms, TEXTURE_FILTER_POINT);
+    SetTextureFilter(texDoor, TEXTURE_FILTER_POINT);
 
-    // Carga de Fuente
     gameFont = LoadFont("fonts/PixelOperator8-Bold.ttf");
 
     InitAudioDevice();
@@ -332,9 +383,8 @@ void UnloadAssets(void)
 }
 
 // ---------------------------------------------------------------------------
-//                           CARGA DE NIVELES (3 NIVELES)
+//                           CARGA DE NIVELES
 // ---------------------------------------------------------------------------
-
 void LoadLevel(int levelId, Rectangle *player, float *velY,
                Platform platforms[], int *platformCount,
                Coin coins[], int *coinCount,
@@ -350,14 +400,12 @@ void LoadLevel(int levelId, Rectangle *player, float *velY,
     door->isLocked = true;
     isGravityInverted = false;
 
-    // Altura del suelo (Y)
     float groundY = 500.0f;
     float ceilingY = 40.0f;
     float coinOffset = COIN_SIZE / 2.0f;
 
-    // Reiniciar animación al cargar nivel
-    animTimer = 0.0f;
-    currentFrame = 0;
+    animTimerPlayer = 0.0f;
+    currentFramePlayer = 0;
     playerFacing = 1.0f;
 
     switch (levelId)
@@ -365,95 +413,67 @@ void LoadLevel(int levelId, Rectangle *player, float *velY,
         case 1: 
             player->x = 50.0f;
             player->y = groundY - PLAYER_SIZE_H - 40.0f; 
-            
             door->rect = (Rectangle){ SCREEN_W - 80, groundY - 40 - DOOR_H, DOOR_W, DOOR_H };
 
-            // Suelo y Techo
             platforms[(*platformCount)++] = (Platform){ { 0, groundY, SCREEN_W, 40 }, false, {0}, 0, 0, {0} };
             platforms[(*platformCount)++] = (Platform){ { 0, 0, SCREEN_W, 40 }, false, {0}, 0, 0, {0} };
-            
-            // Plataformas intermedias
             platforms[(*platformCount)++] = (Platform){ { 200, 350, 150, 20 }, false, {0}, 0, 0, {0} };
             platforms[(*platformCount)++] = (Platform){ { 450, 200, 100, 20 }, false, {0}, 0, 0, {0} };
 
-            // Monedas 
-            coins[(*coinCount)++] = (Coin){ { 275.0f, 350.0f - coinOffset }, false }; 
-            coins[(*coinCount)++] = (Coin){ { 500.0f, 200.0f - coinOffset }, false }; 
-            coins[(*coinCount)++] = (Coin){ { 850.0f, groundY - 40.0f - coinOffset }, false }; 
+            coins[(*coinCount)++] = (Coin){ { 275.0f, 350.0f - coinOffset }, false, 0, 0.0f }; 
+            coins[(*coinCount)++] = (Coin){ { 500.0f, 200.0f - coinOffset }, false, 0, 0.0f }; 
+            coins[(*coinCount)++] = (Coin){ { 850.0f, groundY - 40.0f - coinOffset }, false, 0, 0.0f }; 
             
-            // Slimes 
-            slimes[(*slimeCount)++] = (Slime){ { 650, groundY - SLIME_SIZE_H, SLIME_SIZE_W, SLIME_SIZE_H }, SLIME_PURPLE, 70.0f, {650.0f, groundY - SLIME_SIZE_H}, 100.0f, 1, true };
-            
+            // Slime inicializado con variables de animación
+            slimes[(*slimeCount)++] = (Slime){ { 650, groundY - SLIME_HITBOX_H, SLIME_HITBOX_W, SLIME_HITBOX_H }, SLIME_PURPLE, 70.0f, {650.0f, groundY - SLIME_HITBOX_H}, 100.0f, 1, true, 0, 0.0f };
             break;
 
         case 2: 
             player->x = 50.0f;
             player->y = groundY - PLAYER_SIZE_H - 40.0f;
-            
-            // Puerta: Accessible por el agujero en el techo
             door->rect = (Rectangle){ 250, ceilingY, DOOR_W, DOOR_H }; 
             
-            // Suelo, Techo (con agujero) y Plataformas
             platforms[(*platformCount)++] = (Platform){ { 0, groundY, SCREEN_W, 40 }, false, {0}, 0, 0, {0} };
             platforms[(*platformCount)++] = (Platform){ { 0, 0, 200, 40 }, false, {0}, 0, 0, {0} };       
             platforms[(*platformCount)++] = (Platform){ { 350, 0, SCREEN_W-350, 40 }, false, {0}, 0, 0, {0} }; 
-            
-            // Plataformas para acceder al techo
-            platforms[(*platformCount)++] = (Platform){ { 100, 400, 100, 20 }, false, {0}, 0, 0, {0} }; // Peldaño 1
-            platforms[(*platformCount)++] = (Platform){ { 300, 300, 100, 20 }, false, {0}, 0, 0, {0} }; // Peldaño 2
-            
-            // Plataforma Móvil para desafío
+            platforms[(*platformCount)++] = (Platform){ { 100, 400, 100, 20 }, false, {0}, 0, 0, {0} }; 
+            platforms[(*platformCount)++] = (Platform){ { 300, 300, 100, 20 }, false, {0}, 0, 0, {0} }; 
             platforms[(*platformCount)++] = (Platform){ { 500, 350, 100, 20 }, true, {-1.0f, 0.0f}, 250.0f, 120.0f, {500.0f, 350.0f} }; 
 
-            // Monedas (4 monedas para más desafío)
-            coins[(*coinCount)++] = (Coin){ { 150.0f, 400.0f - coinOffset }, false }; // Sobre Peldaño 1
-            coins[(*coinCount)++] = (Coin){ { 550.0f, 350.0f - coinOffset }, false }; // Sobre plataforma móvil
-            coins[(*coinCount)++] = (Coin){ { 350.0f, 300.0f - coinOffset }, false }; // Sobre Peldaño 2
-            coins[(*coinCount)++] = (Coin){ { 275.0f, ceilingY + DOOR_H + coinOffset }, false }; // Cerca de la puerta (arriba)
+            coins[(*coinCount)++] = (Coin){ { 150.0f, 400.0f - coinOffset }, false, 0, 0.0f }; 
+            coins[(*coinCount)++] = (Coin){ { 550.0f, 350.0f - coinOffset }, false, 0, 0.0f }; 
+            coins[(*coinCount)++] = (Coin){ { 350.0f, 300.0f - coinOffset }, false, 0, 0.0f }; 
+            coins[(*coinCount)++] = (Coin){ { 275.0f, ceilingY + DOOR_H + coinOffset }, false, 0, 0.0f }; 
 
-            // Slimes (AÑADIDO UN SLIME EXTRA, total 2)
-            slimes[(*slimeCount)++] = (Slime){ { 100, groundY - SLIME_SIZE_H, SLIME_SIZE_W, SLIME_SIZE_H }, SLIME_PURPLE, 75.0f, {100.0f, groundY - SLIME_SIZE_H}, 150.0f, 1, true };
-            slimes[(*slimeCount)++] = (Slime){ { 700, groundY - SLIME_SIZE_H, SLIME_SIZE_W, SLIME_SIZE_H }, SLIME_PURPLE, 95.0f, {700.0f, groundY - SLIME_SIZE_H}, 120.0f, -1, true };
-            
+            slimes[(*slimeCount)++] = (Slime){ { 100, groundY - SLIME_HITBOX_H, SLIME_HITBOX_W, SLIME_HITBOX_H }, SLIME_PURPLE, 75.0f, {100.0f, groundY - SLIME_HITBOX_H}, 150.0f, 1, true, 0, 0.0f };
+            slimes[(*slimeCount)++] = (Slime){ { 700, groundY - SLIME_HITBOX_H, SLIME_HITBOX_W, SLIME_HITBOX_H }, SLIME_PURPLE, 95.0f, {700.0f, groundY - SLIME_HITBOX_H}, 120.0f, -1, true, 0, 0.0f };
             break;
             
         case 3: 
             player->x = 50.0f;
             player->y = groundY - PLAYER_SIZE_H - 40.0f;
-            
             door->rect = (Rectangle){ 850, groundY - 40 - DOOR_H, DOOR_W, DOOR_H };
             
-            // Suelo 
             platforms[(*platformCount)++] = (Platform){ { 0, groundY, 300, 40 }, false, {0}, 0, 0, {0} };
             platforms[(*platformCount)++] = (Platform){ { 400, groundY, SCREEN_W - 400, 40 }, false, {0}, 0, 0, {0} };
-
-            // Techo 
             platforms[(*platformCount)++] = (Platform){ { 0, 0, 450, 40 }, false, {0}, 0, 0, {0} }; 
             platforms[(*platformCount)++] = (Platform){ { 550, 0, SCREEN_W - 550, 40 }, false, {0}, 0, 0, {0} }; 
-            
-            // Plataformas INTERMEDIAS
             platforms[(*platformCount)++] = (Platform){ { 200, 400, 100, 20 }, false, {0}, 0, 0, {0} }; 
             platforms[(*platformCount)++] = (Platform){ { 400, 300, 100, 20 }, false, {0}, 0, 0, {0} }; 
             platforms[(*platformCount)++] = (Platform){ { 600, 200, 100, 20 }, false, {0}, 0, 0, {0} }; 
-            
-            // Plataforma Móvil
             platforms[(*platformCount)++] = (Platform){ { 100, 100, 100, 20 }, true, {1.0f, 0.0f}, 250.0f, 80.0f, {100.0f, 100.0f} }; 
             
-            // Monedas 
-            coins[(*coinCount)++] = (Coin){ { 250.0f, 400.0f - coinOffset }, false }; 
-            coins[(*coinCount)++] = (Coin){ { 450.0f, 300.0f - coinOffset }, false }; 
-            coins[(*coinCount)++] = (Coin){ { 650.0f, 200.0f - coinOffset }, false }; 
-            coins[(*coinCount)++] = (Coin){ { 750.0f, 100.0f - coinOffset }, false }; 
+            coins[(*coinCount)++] = (Coin){ { 250.0f, 400.0f - coinOffset }, false, 0, 0.0f }; 
+            coins[(*coinCount)++] = (Coin){ { 450.0f, 300.0f - coinOffset }, false, 0, 0.0f }; 
+            coins[(*coinCount)++] = (Coin){ { 650.0f, 200.0f - coinOffset }, false, 0, 0.0f }; 
+            coins[(*coinCount)++] = (Coin){ { 750.0f, 100.0f - coinOffset }, false, 0, 0.0f }; 
 
-            // Slimes (SIN TRAMPAS)
-            slimes[(*slimeCount)++] = (Slime){ { 100, groundY - SLIME_SIZE_H, SLIME_SIZE_W, SLIME_SIZE_H }, SLIME_PURPLE, 80.0f, {100.0f, groundY - SLIME_SIZE_H}, 180.0f, 1, true };
-            slimes[(*slimeCount)++] = (Slime){ { 700, groundY - SLIME_SIZE_H, SLIME_SIZE_W, SLIME_SIZE_H }, SLIME_PURPLE, 90.0f, {700.0f, groundY - SLIME_SIZE_H}, 150.0f, -1, true };
-            slimes[(*slimeCount)++] = (Slime){ { 500, ceilingY, SLIME_SIZE_W, SLIME_SIZE_H }, SLIME_PURPLE, 100.0f, {500.0f, ceilingY}, 300.0f, 1, true };
-            
+            slimes[(*slimeCount)++] = (Slime){ { 100, groundY - SLIME_HITBOX_H, SLIME_HITBOX_W, SLIME_HITBOX_H }, SLIME_PURPLE, 80.0f, {100.0f, groundY - SLIME_HITBOX_H}, 180.0f, 1, true, 0, 0.0f };
+            slimes[(*slimeCount)++] = (Slime){ { 700, groundY - SLIME_HITBOX_H, SLIME_HITBOX_W, SLIME_HITBOX_H }, SLIME_PURPLE, 90.0f, {700.0f, groundY - SLIME_HITBOX_H}, 150.0f, -1, true, 0, 0.0f };
+            slimes[(*slimeCount)++] = (Slime){ { 500, ceilingY, SLIME_HITBOX_W, SLIME_HITBOX_H }, SLIME_PURPLE, 100.0f, {500.0f, ceilingY}, 300.0f, 1, true, 0, 0.0f };
             break;
 
-        default:
-            break;
+        default: break;
     }
 }
 
@@ -493,7 +513,7 @@ int main(void)
     while (!WindowShouldClose())
     {
         float dt = GetFrameTime();
-        bool isMoving = false; // Variable para saber si el jugador está caminando
+        bool isMoving = false; 
 
         switch (gamestate)
         {
@@ -507,15 +527,15 @@ int main(void)
         { 
             float moveSpeed = 200.0f; 
             
-            // --- Lógica de Movimiento y Orientación ---
+            // --- Movimiento y Orientación ---
             if (IsKeyDown(KEY_LEFT)) {
                 player.x -= moveSpeed * dt;
-                playerFacing = -1.0f; // Mirando a la izquierda
+                playerFacing = -1.0f; 
                 isMoving = true;
             }
             if (IsKeyDown(KEY_RIGHT)) {
                 player.x += moveSpeed * dt;
-                playerFacing = 1.0f; // Mirando a la derecha
+                playerFacing = 1.0f; 
                 isMoving = true;
             }
             
@@ -531,30 +551,28 @@ int main(void)
                 PlaySound(fxJump);
             }
 
-            // ----------- Cambio de gravedad (SOLO EN EL PISO) -----------
+            // ----------- Cambio de gravedad -----------
             if (onGround && IsKeyPressed(KEY_UP))
                 isGravityInverted = !isGravityInverted;
 
-            // ===> Lógica de Animación (Update) <===
+            // ===> Lógica de Animación JUGADOR <===
             if (isMoving && onGround)
             {
-                animTimer += dt;
-                if (animTimer >= ANIMATION_SPEED)
+                animTimerPlayer += dt;
+                if (animTimerPlayer >= ANIM_SPEED_PLAYER)
                 {
-                    // Cicla los frames de caminar (0, 1, 2, 3)
-                    currentFrame = (currentFrame + 1) % WALK_FRAMES; 
-                    animTimer = 0.0f;
+                    currentFramePlayer = (currentFramePlayer + 1) % PLAYER_FRAMES; 
+                    animTimerPlayer = 0.0f;
                 }
             }
             else
             {
-                // Reposo (Idle) o Salto/Caída
-                currentFrame = 0; 
-                animTimer = 0.0f;
+                currentFramePlayer = 0; 
+                animTimerPlayer = 0.0f;
             }
             
-            // Actualizar el rectángulo de origen de la textura del jugador (Frame X)
-            texRecPlayer.x = currentFrame * PLAYER_FRAME_WIDTH;
+            // Actualizar Frame X del jugador
+            texRecPlayer.x = currentFramePlayer * SPRITE_SIZE_SRC;
             
             // ----------- Física vertical -----------
             velY += (isGravityInverted ? -gravity : gravity) * dt;
@@ -567,26 +585,26 @@ int main(void)
             if (player.x + player.width > SCREEN_W) player.x = SCREEN_W - player.width;
 
             UpdatePlatforms(platforms, platformCount, dt);
+            
+            // ===> ACTUALIZACIÓN DE ANIMACIONES <===
             UpdateSlimes(slimes, slimeCount, dt);
+            UpdateCoinsAnim(coins, coinCount, dt);
 
             CheckCoinCollection(player, coins, coinCount, &score);
 
-            // ----------- Colisiones mortales -----------
             if (CheckSlimeCollision(player, slimes, slimeCount))
             {
                 PlaySound(fxHurt);
                 gamestate = GAMEOVER;
             }
 
-            // ===> Game Over por volar fuera de límites (CORREGIDO) <===
-            if ((isGravityInverted && (player.y + player.height < 0)) || // Si gravedad invertida Y sales por el TECHO
-                (!isGravityInverted && (player.y > SCREEN_H)))          // O si gravedad normal Y sales por el SUELO
+            if ((isGravityInverted && (player.y + player.height < 0)) || 
+                (!isGravityInverted && (player.y > SCREEN_H)))          
             {
                  PlaySound(fxHurt);
                  gamestate = GAMEOVER;
             }
             
-            // ----------- Lógica de la Puerta y Fin del Nivel -----------
             bool allCollected = true;
             for (int i = 0; i < coinCount; i++)
                 if (!coins[i].collected) allCollected = false;
@@ -635,12 +653,11 @@ int main(void)
         //                               DRAW 
         // -------------------------------------------------------------------
         BeginDrawing();
-        ClearBackground((Color){135, 206, 235, 255}); // AZUL CIELO
+        ClearBackground((Color){135, 206, 235, 255}); 
         
         int fontSize = 20; 
         int victoryFontSize = 60; 
         
-        // --- Cálculo de si la puerta está desbloqueada para mostrar el mensaje ---
         bool allCoinsCollected = true;
         if (gamestate == PLAYING) {
             for (int i = 0; i < coinCount; i++)
@@ -675,47 +692,69 @@ int main(void)
                     } else {
                         sourcePlat.width = PLATFORM_TILE_W;
                     }
-                    
                     DrawTexturePro(texPlatforms, sourcePlat, dest, (Vector2){0}, 0.0f, WHITE);
                 }
                 sourcePlat.width = PLATFORM_TILE_W; 
             }
 
-            // Dibujar monedas
+            // ===> Dibujar Monedas con Animación y Escala Grande <===
             for (int i = 0; i < coinCount; i++) {
                 if (!coins[i].collected) {
-                    Vector2 coinDrawPos = { coins[i].center.x - COIN_SIZE / 2, coins[i].center.y - COIN_SIZE / 2 };
-                    DrawTextureRec(texCoin, texRecCoin, coinDrawPos, WHITE); 
+                    // Seleccionamos el cuadro actual de la moneda
+                    texRecCoin.x = coins[i].currentFrame * SPRITE_SIZE_SRC;
+
+                    // Centramos la moneda más grande (ajuste visual)
+                    Vector2 drawPos = { coins[i].center.x - COIN_SIZE/2, coins[i].center.y - COIN_SIZE/2 };
+                    Rectangle destCoin = { drawPos.x, drawPos.y, COIN_SIZE, COIN_SIZE };
+                    
+                    DrawTexturePro(texCoin, texRecCoin, destCoin, (Vector2){0}, 0.0f, WHITE);
                 }
             }
             
-            // Dibujar slimes Púrpura (ESCALADOS)
-            for (int i = 0; i < slimeCount; i++)
-                if (slimes[i].isActive)
-                    DrawTexturePro(texSlimePurple, texRecSlimePurple, slimes[i].rect, (Vector2){0}, 0.0f, WHITE);
+            // ===> Dibujar Slimes con Animación <===
+            for (int i = 0; i < slimeCount; i++) {
+                if (slimes[i].isActive) {
+                    // Actualizamos source rect basado en frame
+                    texRecSlime.x = slimes[i].currentFrame * SPRITE_SIZE_SRC;
 
+                    // Dibujamos un poco más grande que la hitbox para que se vea bien
+                    // Centramos el dibujo sobre la hitbox
+                    float drawX = slimes[i].rect.x + (slimes[i].rect.width - SLIME_W_DRAW) / 2;
+                    float drawY = slimes[i].rect.y + (slimes[i].rect.height - SLIME_H_DRAW); 
 
-            // ===> Dibujar jugador con animación y flip (ESCALADO) <===
+                    Rectangle destSlime = { drawX, drawY, SLIME_W_DRAW, SLIME_H_DRAW };
+
+                    // Flip horizontal si cambia de dirección (opcional, aquí no implementado pero preparado)
+                    Rectangle src = texRecSlime; 
+                    if (slimes[i].dir > 0) src.width = -SPRITE_SIZE_SRC; // Espejo si va a la derecha (depende de tu arte)
+                    else src.width = SPRITE_SIZE_SRC;
+
+                    DrawTexturePro(texSlimePurple, src, destSlime, (Vector2){0}, 0.0f, WHITE);
+                }
+            }
+
+            // ===> Dibujar Jugador <===
             Rectangle destRecPlayer = player;
+            // Ajuste visual para que el sprite cubra la hitbox
+            destRecPlayer.x -= 10; // Ajuste fino visual
+            destRecPlayer.width = PLAYER_SIZE_W * 1.5; // Dibujamos más ancho que la hitbox
             
-            // Aplicar 'flip': Multiplicamos el ancho del sprite de origen por la dirección
             Rectangle finalSourceRec = texRecPlayer;
-            finalSourceRec.width *= playerFacing; 
+            finalSourceRec.width = SPRITE_SIZE_SRC * playerFacing; 
             
             DrawTexturePro(texKnight, finalSourceRec, destRecPlayer, (Vector2){0}, 0.0f, WHITE);
             
-            // Dibujar Puerta (cerrada o abierta)
+            // Dibujar Puerta
             Rectangle doorSource = levelDoor.isLocked ? (Rectangle){0, 0, 32, 48} : (Rectangle){32, 0, 32, 48}; 
             DrawTexturePro(texDoor, doorSource, levelDoor.rect, (Vector2){0}, 0.0f, WHITE);
 
-            // --- HUD y MENSAJE DE PUERTA ---
+            // --- HUD ---
             DrawTextEx(gameFont, TextFormat("Nivel: %d/%d", currentLevel, MAX_LEVELS), (Vector2){10, 10}, fontSize, 0, RAYWHITE);
             DrawTextEx(gameFont, TextFormat("Puntaje: %d/%d", score, coinCount), (Vector2){10, 35}, fontSize, 0, RAYWHITE);
-            DrawTextEx(gameFont, isGravityInverted ? "Gravedad: Arriba (UP)" : "Gravedad: Abajo (UP)", (Vector2){10, 60}, fontSize, 0, RAYWHITE);
+            DrawTextEx(gameFont, isGravityInverted ? "Gravedad: Arriba" : "Gravedad: Abajo", (Vector2){10, 60}, fontSize, 0, RAYWHITE);
             
-            // Mensaje de Desbloqueo de Puerta
             if (allCoinsCollected) {
-                const char *msg = "¡PUERTA DESBLOQUEADA! Adelante (->)";
+                const char *msg = "¡PUERTA ABIERTA!";
                 float msgW = MeasureTextEx(gameFont, msg, fontSize, 0).x;
                 DrawTextEx(gameFont, msg, (Vector2){SCREEN_W/2 - msgW/2, 90}, fontSize, 0, GREEN);
             }
@@ -730,7 +769,6 @@ int main(void)
             break;
 
         case VICTORY:
-            // "GANASTE" más grande
             DrawTextEx(gameFont, "GANASTE", (Vector2){SCREEN_W/2 - MeasureTextEx(gameFont, "GANASTE", victoryFontSize, 0).x/2, SCREEN_H/2 - 40}, victoryFontSize, 0, GREEN);
             DrawTextEx(gameFont, TextFormat("Puntaje Final: %d", score), (Vector2){SCREEN_W/2 - MeasureTextEx(gameFont, TextFormat("Puntaje Final: %d", score), fontSize, 0).x/2, SCREEN_H/2 + 70}, fontSize, 0, RAYWHITE);
             DrawTextEx(gameFont, "Presiona ENTER para volver al menu", (Vector2){SCREEN_W/2 - MeasureTextEx(gameFont, "Presiona ENTER para volver al menu", fontSize, 0).x/2, SCREEN_H/2 + 20}, fontSize, 0, GRAY);
