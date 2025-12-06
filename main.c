@@ -1,378 +1,725 @@
-// Gravity Shift - Version con 3 niveles, menu y gravedad corregida
-// Compilar (ejemplo):
-//   gcc main.c -o GravityShift -lraylib -lm -lpthread -ldl -lrt -lX11
-//
-// Controles:
-//   A / D  -> mover izquierda / derecha
-//   F      -> invertir gravedad (solo tocando una superficie)
-//   R      -> reiniciar nivel actual
-//   ENTER  -> iniciar juego (en la pantalla de inicio) / reiniciar desde victoria
-//   ESC    -> salir
-
 #include "raylib.h"
+
+#include <stdbool.h>
 #include <math.h>
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h> 
+
+#define SCREEN_W      960
+#define SCREEN_H      540
+#define FPS           60
+
+#define MAX_PLATFORMS 30
+#define MAX_COINS     40
+// #define MAX_TRAPS     20 // ELIMINADO: Ya no necesitamos trampas/picos
+#define MAX_SLIMES    10
+#define MAX_LEVELS    3
+
+// TAMAÑOS ESCALADOS 
+#define PLAYER_SCALE  2.0f
+#define PLAYER_SIZE_W (int)(16 * PLAYER_SCALE)
+#define PLAYER_SIZE_H (int)(28 * PLAYER_SCALE)
+#define COIN_SIZE     32.0f 
+#define SLIME_SIZE_W  (int)(32 * PLAYER_SCALE)
+#define SLIME_SIZE_H  (int)(28 * PLAYER_SCALE)
+
+// TAMAÑO BASE DEL SPRITE DE PLATAFORMA 
+#define PLATFORM_TILE_W 32.0f
+#define PLATFORM_TILE_H 16.0f
+
+// CONSTANTES DE PUERTA
+#define DOOR_W        32
+#define DOOR_H        48 
+
+// ---------------------------------------------------------------------------
+//   GENERADOR DE ONDA DE SONIDO 
+// ---------------------------------------------------------------------------
+Wave GenerateSineWave(float frequency, float seconds, int sampleRate)
+{
+    int sampleCount = (int)(seconds * sampleRate);
+    short *data = calloc(sampleCount, sizeof(short)); 
+    if (data == NULL) return (Wave){ 0 };
+
+    for (int i = 0; i < sampleCount; i++)
+    {
+        float t = (float)i / sampleRate;
+        float v = sinf(2.0f * PI * frequency * t);
+        data[i] = (short)(v * 32000);
+    }
+
+    Wave w = { 0 };
+    w.frameCount = sampleCount;
+    w.sampleRate = sampleRate;
+    w.sampleSize = 16;
+    w.channels = 1;
+    w.data = data;
+    return w;
+}
+
+// ---------------------------------------------------------------------------
+//                            ESTRUCTURAS
+// ---------------------------------------------------------------------------
+typedef struct {
+    Rectangle rect;
+    bool isMoving;
+    Vector2 dir;
+    float range;
+    float speed;
+    Vector2 startPos;
+} Platform;
+
+typedef struct {
+    Vector2 center;
+    bool collected;
+} Coin;
+
 /*
-typedef struct Platform {
+// ESTRUCTURA TRAP ELIMINADA
+typedef struct {
+    Rectangle rect; 
+    bool isActive;
+} Trap;
+*/
+
+typedef struct {
     Rectangle rect;
-} Platform;
+    bool isLocked;
+} Door;
 
-typedef struct Level {
-    Platform *platforms;
-    int platformCount;
-    Rectangle goal;
-    Vector2 playerStart;
-} Level;
+typedef enum { SLIME_GREEN, SLIME_PURPLE } SlimeType;
 
-typedef struct Player {
-    Vector2 position;
-    Vector2 velocity;
-    int width;
-    int height;
-    bool onGround;
-    int gravityDir; // 1 = hacia abajo, -1 = hacia arriba
-} Player;
-
-typedef enum {
-    GAME_MENU,
-    GAME_PLAYING,
-    GAME_VICTORY
-} GameState;*/
-
-// Gravity Shift - 3 niveles, menu, gravedad y pinchos
-// Compilar (ejemplo):
-//   gcc main.c -o GravityShift -lraylib -lm -lpthread -ldl -lrt -lX11
-//
-// Controles:
-//   A / D  -> mover izquierda / derecha
-//   F      -> invertir gravedad (solo tocando una superficie)
-//   R      -> reiniciar nivel actual
-//   ENTER  -> iniciar juego / reiniciar desde victoria
-//   ESC    -> salir
-
-#include "raylib.h"
-
-typedef struct Platform {
+typedef struct {
     Rectangle rect;
-} Platform;
+    SlimeType type;
+    float speed;
+    Vector2 startPos;
+    float range;
+    int dir;
+    bool isActive;
+} Slime;
 
-typedef struct Spike {
-    Rectangle rect;
-} Spike;
+typedef enum { MENU, PLAYING, GAMEOVER, VICTORY } GameState;
 
-typedef struct Level {
-    Platform *platforms;
-    int platformCount;
-    Spike *spikes;
-    int spikeCount;
-    Rectangle goal;
-    Vector2 playerStart;
-} Level;
+// ---------------------------------------------------------------------------
+int currentLevel = 1;
+int score = 0;
+bool isGravityInverted = false; 
 
-typedef struct Player {
-    Vector2 position;
-    Vector2 velocity;
-    int width;
-    int height;
-    bool onGround;
-    int gravityDir; // 1 = hacia abajo, -1 = hacia arriba
-} Player;
+// Texturas y Fuentes (RUTAS ABSOLUTAS)
+Texture2D texKnight;
+Texture2D texCoin;
+Texture2D texPlatforms;
+Texture2D texSlimePurple;
+Texture2D texDoor; 
+// Texture2D texTrap; // ELIMINADO
+Font gameFont;
 
-typedef enum {
-    GAME_MENU,
-    GAME_PLAYING,
-    GAME_VICTORY
-} GameState;
+// Rectángulos de origen para el sprite sheet
+Rectangle texRecPlayer = { 0, 0, 16, 28 }; 
+Rectangle texRecCoin = { 0, 0, 16, 16 };   
+Rectangle texRecSlimePurple = { 0, 0, 32, 28 }; 
+Rectangle texRecPlatform = { 0, 0, 32, 16 }; 
+// Rectangle texRecTrap = { 0, 0, 32, 16 }; // ELIMINADO
 
-// ------------ Declaración de niveles -------------
+// Sonidos
+Sound fxCoin;
+Sound fxExplosion;
+Sound fxHurt;
+Sound fxJump;
 
-// Nivel 1: sencillo, intro
-Platform level1Platforms[] = {
-    { (Rectangle){ 0, 400, 800, 50 } },   // piso
-    { (Rectangle){ 200, 320, 120, 20 } },
-    { (Rectangle){ 420, 280, 140, 20 } },
-    { (Rectangle){ 0, 50, 800, 20 } }     // techo
-};
+// Puerta del nivel actual
+Door levelDoor; 
 
-Spike level1Spikes[] = {
-    // Algunos pinchos en el piso y bajo una plataforma
-    { (Rectangle){ 320, 380, 40, 20 } },
-    { (Rectangle){ 580, 380, 40, 20 } }
-};
+// ---------------------------------------------------------------------------
+// PROTOTIPOS DE FUNCIONES 
+// ---------------------------------------------------------------------------
+void LoadAssets(void);
+void UnloadAssets(void);
+Color GetPlatformColor(int level);
+bool CheckCollisionRectEx(Rectangle a, Rectangle b);
+bool IsTouchingSurface(Rectangle player, Platform platforms[], int platformCount, bool isAbove);
+void ResolveVerticalCollisions(Rectangle *player, float *velY, Platform platforms[], int platformCount, bool gravityInverted);
+void ResolveHorizontalCollisions(Rectangle *player, Platform platforms[], int platformCount);
+void UpdatePlatforms(Platform platforms[], int platformCount, float dt);
+void UpdateSlimes(Slime slimes[], int slimeCount, float dt);
+void CheckCoinCollection(Rectangle player, Coin coins[], int coinCount, int *score);
+// bool CheckTrapCollision(Rectangle player, Trap traps[], int trapCount); // ELIMINADO
+bool CheckSlimeCollision(Rectangle player, Slime slimes[], int slimeCount);
+void LoadLevel(int levelId, Rectangle *player, float *velY,
+               Platform platforms[], int *platformCount,
+               Coin coins[], int *coinCount,
+               // Trap traps[], int *trapCount, // ELIMINADO
+               Slime slimes[], int *slimeCount,
+               Door *door); 
 
-// Nivel 2: más huecos, más pinchos
-Platform level2Platforms[] = {
-    { (Rectangle){ 0,   400, 260, 50 } },
-    { (Rectangle){ 320, 400, 160, 50 } },
-    { (Rectangle){ 540, 400, 260, 50 } },
-    { (Rectangle){ 150, 320, 120, 20 } },
-    { (Rectangle){ 360, 270, 120, 20 } },
-    { (Rectangle){ 580, 230, 120, 20 } },
-    { (Rectangle){ 0,   60, 300, 20 } },
-    { (Rectangle){ 500, 60, 300, 20 } }
-};
+// ---------------------------------------------------------------------------
+//                     DEFINICIONES DE FUNCIONES
+// ---------------------------------------------------------------------------
 
-Spike level2Spikes[] = {
-    // Entre bloques de piso
-    { (Rectangle){ 260, 380, 60, 20 } },
-    { (Rectangle){ 480, 380, 60, 20 } },
-    // Debajo de plataformas intermedias
-    { (Rectangle){ 180, 340, 60, 20 } },
-    { (Rectangle){ 390, 290, 60, 20 } },
-    // Bajo la plataforma alta del lado derecho
-    { (Rectangle){ 600, 250, 60, 20 } }
-};
-
-// Nivel 3: vertical y con muchos pinchos
-Platform level3Platforms[] = {
-    // piso fragmentado
-    { (Rectangle){ 0,   400, 180, 50 } },
-    { (Rectangle){ 260, 400, 120, 50 } },
-    { (Rectangle){ 430, 400, 120, 50 } },
-    { (Rectangle){ 610, 400, 190, 50 } },
-
-    // plataformas intermedias
-    { (Rectangle){ 120, 320, 120, 20 } },
-    { (Rectangle){ 320, 290, 120, 20 } },
-    { (Rectangle){ 520, 260, 120, 20 } },
-
-    // techo fragmentado
-    { (Rectangle){ 0,   60, 200, 20 } },
-    { (Rectangle){ 300, 60, 150, 20 } },
-    { (Rectangle){ 520, 60, 280, 20 } }
-};
-
-Spike level3Spikes[] = {
-    // Suelo entre fragmentos
-    { (Rectangle){ 180, 380, 80, 20 } },
-    { (Rectangle){ 380, 380, 80, 20 } },
-    // En medio del nivel
-    { (Rectangle){ 240, 340, 60, 20 } },
-    { (Rectangle){ 440, 310, 60, 20 } },
-    { (Rectangle){ 640, 280, 80, 20 } },
-    // Bajo el techo (para castigar mal uso de la gravedad invertida)
-    { (Rectangle){ 60,  80, 60, 20 } },
-    { (Rectangle){ 340, 80, 60, 20 } },
-    { (Rectangle){ 600, 80, 80, 20 } }
-};
-
-// Definición de niveles
-Level levels[3];
-
-// ------------ Auxiliares ---------------------
-
-Rectangle GetPlayerRect(Player p) {
-    return (Rectangle){ p.position.x, p.position.y, (float)p.width, (float)p.height };
-}
-
-void LoadLevels() {
-    // Nivel 1
-    levels[0].platforms     = level1Platforms;
-    levels[0].platformCount = sizeof(level1Platforms)/sizeof(level1Platforms[0]);
-    levels[0].spikes        = level1Spikes;
-    levels[0].spikeCount    = sizeof(level1Spikes)/sizeof(level1Spikes[0]);
-    levels[0].goal          = (Rectangle){ 730, 360, 40, 40 };
-    levels[0].playerStart   = (Vector2){ 40, 360 };
-
-    // Nivel 2
-    levels[1].platforms     = level2Platforms;
-    levels[1].platformCount = sizeof(level2Platforms)/sizeof(level2Platforms[0]);
-    levels[1].spikes        = level2Spikes;
-    levels[1].spikeCount    = sizeof(level2Spikes)/sizeof(level2Spikes[0]);
-    levels[1].goal          = (Rectangle){ 740, 360, 40, 40 };
-    levels[1].playerStart   = (Vector2){ 40, 360 };
-
-    // Nivel 3
-    levels[2].platforms     = level3Platforms;
-    levels[2].platformCount = sizeof(level3Platforms)/sizeof(level3Platforms[0]);
-    levels[2].spikes        = level3Spikes;
-    levels[2].spikeCount    = sizeof(level3Spikes)/sizeof(level3Spikes[0]);
-    // Meta accesible sobre el último bloque de piso
-    levels[2].goal          = (Rectangle){ 700, 360, 40, 40 };
-    levels[2].playerStart   = (Vector2){ 40, 360 };
-}
-
-void ResetPlayer(Player *p, Level level) {
-    p->position   = level.playerStart;
-    p->velocity   = (Vector2){ 0, 0 };
-    p->width      = 24;
-    p->height     = 32;
-    p->onGround   = false;
-    p->gravityDir = 1;
-}
-
-// Colisiones sencillas eje por eje
-void ResolveCollisions(Player *p, Level level, float dt, float gravity) {
-    Rectangle playerRect;
-    p->onGround = false;
-
-    // Horizontal
-    p->position.x += p->velocity.x * dt;
-    playerRect = GetPlayerRect(*p);
-
-    for (int i = 0; i < level.platformCount; i++) {
-        if (CheckCollisionRecs(playerRect, level.platforms[i].rect)) {
-            Rectangle plat = level.platforms[i].rect;
-            if (p->velocity.x > 0) {
-                p->position.x = plat.x - p->width;
-            } else if (p->velocity.x < 0) {
-                p->position.x = plat.x + plat.width;
-            }
-            playerRect = GetPlayerRect(*p);
-        }
+Color GetPlatformColor(int level) {
+    switch (level) {
+        case 1: return (Color){139, 69, 19, 255};
+        case 2: return (Color){0, 105, 148, 255};
+        case 3: return (Color){85, 26, 139, 255};
+        default: return DARKGRAY;
     }
+}
 
-    // Vertical (gravedad)
-    p->velocity.y += gravity * p->gravityDir * dt;
-    p->position.y += p->velocity.y * dt;
-    playerRect = GetPlayerRect(*p);
+bool CheckCollisionRectEx(Rectangle a, Rectangle b) {
+    return !(a.x + a.width <= b.x || a.x >= b.x + b.width ||
+             a.y + a.height <= b.y || a.y >= b.y + b.height);
+}
 
-    for (int i = 0; i < level.platformCount; i++) {
-        Rectangle plat = level.platforms[i].rect;
-        if (CheckCollisionRecs(playerRect, plat)) {
-            if (p->gravityDir == 1) {
-                p->position.y = plat.y - p->height;
+bool IsTouchingSurface(Rectangle player, Platform platforms[], int platformCount, bool isAbove) {
+    Rectangle onePixel = player;
+    onePixel.y += isAbove ? -1 : 1;
+
+    for (int i = 0; i < platformCount; i++) {
+        if (CheckCollisionRectEx(onePixel, platforms[i].rect)) return true;
+    }
+    return false;
+}
+
+void ResolveVerticalCollisions(Rectangle *player, float *velY, Platform platforms[], int platformCount, bool gravityInverted) 
+{
+    for (int i = 0; i < platformCount; i++) {
+        Rectangle p = platforms[i].rect;
+
+        if (CheckCollisionRectEx(*player, p)) {
+            float centerPlayer = player->y + player->height * 0.5f;
+            float centerPlat   = p.y + p.height * 0.5f;
+
+            if (!gravityInverted) {
+                if (*velY > 0 && centerPlayer < centerPlat) {
+                    player->y = p.y - player->height;
+                    *velY = 0;
+                } else if (*velY < 0 && centerPlayer > centerPlat) {
+                    player->y = p.y + p.height;
+                    *velY = 0;
+                }
             } else {
-                p->position.y = plat.y + plat.height;
+                if (*velY < 0 && centerPlayer > centerPlat) {
+                    player->y = p.y + p.height;
+                    *velY = 0;
+                } else if (*velY > 0 && centerPlayer < centerPlat) {
+                    player->y = p.y - player->height;
+                    *velY = 0;
+                }
             }
-            p->velocity.y = 0;
-            p->onGround   = true;
-            playerRect    = GetPlayerRect(*p);
         }
     }
 }
 
-int main(void) {
-    const int screenWidth  = 800;
-    const int screenHeight = 450;
+void ResolveHorizontalCollisions(Rectangle *player, Platform platforms[], int platformCount) 
+{
+    for (int i = 0; i < platformCount; i++) {
+        Rectangle p = platforms[i].rect;
 
-    InitWindow(screenWidth, screenHeight, "Gravity Shift - 3 niveles con pinchos");
-    SetTargetFPS(60);
+        if (CheckCollisionRectEx(*player, p)) {
+            float overlapLeft  = (player->x + player->width) - p.x;
+            float overlapRight = (p.x + p.width) - player->x;
 
-    LoadLevels();
+            if (overlapLeft < overlapRight && overlapLeft > 0)
+                player->x -= overlapLeft;
+            else if (overlapRight > 0)
+                player->x += overlapRight;
+        }
+    }
+}
 
-    Player player;
-    int currentLevel = 0;
-    ResetPlayer(&player, levels[currentLevel]);
+void UpdatePlatforms(Platform platforms[], int platformCount, float dt) 
+{
+    for (int i = 0; i < platformCount; i++) {
+        if (!platforms[i].isMoving) continue;
 
-    float moveSpeed = 200.0f;
-    float gravity   = 700.0f;
+        platforms[i].rect.x += platforms[i].dir.x * platforms[i].speed * dt;
+        platforms[i].rect.y += platforms[i].dir.y * platforms[i].speed * dt;
 
-    GameState state = GAME_MENU;
+        float dx = platforms[i].rect.x - platforms[i].startPos.x;
+        float dy = platforms[i].rect.y - platforms[i].startPos.y;
+        float dist = sqrtf(dx*dx + dy*dy);
 
-    while (!WindowShouldClose()) {
+        if (dist >= platforms[i].range) {
+            platforms[i].dir.x *= -1;
+            platforms[i].dir.y *= -1;
+            platforms[i].startPos = (Vector2){ platforms[i].rect.x, platforms[i].rect.y };
+        }
+    }
+}
+
+void UpdateSlimes(Slime slimes[], int slimeCount, float dt) 
+{
+    for (int i = 0; i < slimeCount; i++) {
+        if (!slimes[i].isActive) continue;
+
+        slimes[i].rect.x += slimes[i].dir * slimes[i].speed * dt;
+
+        float dx = slimes[i].rect.x - slimes[i].startPos.x;
+        float dist = fabsf(dx);
+
+        if (dist >= slimes[i].range) {
+            slimes[i].dir *= -1;
+            slimes[i].startPos.x = slimes[i].rect.x;
+        }
+    }
+}
+
+void CheckCoinCollection(Rectangle player, Coin coins[], int coinCount, int *score) 
+{
+    for (int i = 0; i < coinCount; i++) {
+        if (!coins[i].collected) {
+            if (CheckCollisionCircleRec(coins[i].center, COIN_SIZE / 2, player)) {
+                coins[i].collected = true;
+                (*score)++;
+                PlaySound(fxCoin);
+            }
+        }
+    }
+}
+
+/*
+// FUNCIÓN ELIMINADA: Ya no se usan trampas/picos
+bool CheckTrapCollision(Rectangle player, Trap traps[], int trapCount) {
+    for (int i = 0; i < trapCount; i++)
+        if (traps[i].isActive && CheckCollisionRectEx(player, traps[i].rect))
+            return true;
+    return false;
+}
+*/
+
+bool CheckSlimeCollision(Rectangle player, Slime slimes[], int slimeCount) {
+    for (int i = 0; i < slimeCount; i++)
+        if (slimes[i].isActive && CheckCollisionRectEx(player, slimes[i].rect))
+            return true;
+    return false;
+}
+
+// ---------------------------------------------------------------------------
+//                   CARGA Y DESCARGA DE ASSETS (RUTAS ABSOLUTAS)
+// ---------------------------------------------------------------------------
+void LoadAssets(void)
+{
+    // Carga de Texturas (ASUME que las rutas son correctas, si fallan aquí está el error)
+    texKnight = LoadTexture("sprites/knight.png");
+    texCoin = LoadTexture("sprites/coin.png");
+    texPlatforms = LoadTexture("sprites/platforms.png");
+    texSlimePurple = LoadTexture("sprites/slime_purple.png");
+    texDoor = LoadTexture("sprites/door.png"); 
+    // texTrap = LoadTexture("sprites/spikes.png"); // ELIMINADO
+
+    // Carga de Fuente
+    gameFont = LoadFont("fonts/PixelOperator8-Bold.ttf");
+
+    InitAudioDevice();
+    if (IsAudioDeviceReady()) 
+    {
+        Wave w1 = GenerateSineWave(440, 0.1f, 44100);
+        Wave w2 = GenerateSineWave(200, 0.3f, 44100);
+        Wave w3 = GenerateSineWave(800, 0.1f, 44100);
+
+        fxCoin = LoadSoundFromWave(w1);
+        fxHurt = LoadSoundFromWave(w2);
+        fxJump = LoadSoundFromWave(w3);
+
+        UnloadWave(w1);
+        UnloadWave(w2);
+        UnloadWave(w3);
+    }
+}
+
+void UnloadAssets(void)
+{
+    UnloadTexture(texKnight);
+    UnloadTexture(texCoin);
+    UnloadTexture(texPlatforms);
+    UnloadTexture(texSlimePurple);
+    UnloadTexture(texDoor);
+    // UnloadTexture(texTrap); // ELIMINADO
+    UnloadFont(gameFont);
+
+    if (IsAudioDeviceReady()) {
+        UnloadSound(fxCoin);
+        UnloadSound(fxHurt);
+        UnloadSound(fxJump);
+        CloseAudioDevice();
+    }
+}
+
+// ---------------------------------------------------------------------------
+//                           CARGA DE NIVELES (3 NIVELES)
+// ---------------------------------------------------------------------------
+
+void LoadLevel(int levelId, Rectangle *player, float *velY,
+               Platform platforms[], int *platformCount,
+               Coin coins[], int *coinCount,
+               // Trap traps[], int *trapCount, // ELIMINADO
+               Slime slimes[], int *slimeCount,
+               Door *door)
+{
+    *platformCount = 0;
+    *coinCount     = 0;
+    // *trapCount     = 0; // ELIMINADO
+    *slimeCount    = 0;
+    *velY          = 0.0f;
+    *player = (Rectangle){ 0, 0, PLAYER_SIZE_W, PLAYER_SIZE_H };
+    
+    door->isLocked = true;
+    isGravityInverted = false;
+
+    // Altura del suelo (Y)
+    float groundY = 500.0f;
+    float ceilingY = 40.0f;
+    float coinOffset = COIN_SIZE / 2.0f;
+
+    switch (levelId)
+    {
+        case 1: 
+            player->x = 50.0f;
+            player->y = groundY - PLAYER_SIZE_H - 40.0f; 
+            
+            door->rect = (Rectangle){ SCREEN_W - 80, groundY - 40 - DOOR_H, DOOR_W, DOOR_H };
+
+            // Suelo y Techo
+            platforms[(*platformCount)++] = (Platform){ { 0, groundY, SCREEN_W, 40 }, false, {0}, 0, 0, {0} };
+            platforms[(*platformCount)++] = (Platform){ { 0, 0, SCREEN_W, 40 }, false, {0}, 0, 0, {0} };
+            
+            // Plataformas intermedias
+            platforms[(*platformCount)++] = (Platform){ { 200, 350, 150, 20 }, false, {0}, 0, 0, {0} };
+            platforms[(*platformCount)++] = (Platform){ { 450, 200, 100, 20 }, false, {0}, 0, 0, {0} };
+
+            // Monedas 
+            coins[(*coinCount)++] = (Coin){ { 275.0f, 350.0f - coinOffset }, false }; 
+            coins[(*coinCount)++] = (Coin){ { 500.0f, 200.0f - coinOffset }, false }; 
+            coins[(*coinCount)++] = (Coin){ { 850.0f, groundY - 40.0f - coinOffset }, false }; 
+            
+            // Slimes (Sin trampas/picos)
+            slimes[(*slimeCount)++] = (Slime){ { 650, groundY - SLIME_SIZE_H, SLIME_SIZE_W, SLIME_SIZE_H }, SLIME_PURPLE, 70.0f, {650.0f, groundY - SLIME_SIZE_H}, 100.0f, 1, true };
+            
+            break;
+
+        case 2: 
+            player->x = 50.0f;
+            player->y = groundY - PLAYER_SIZE_H - 40.0f;
+            
+            // Puerta: Accessible por el agujero en el techo
+            door->rect = (Rectangle){ 250, ceilingY, DOOR_W, DOOR_H }; 
+            
+            // Suelo, Techo (con agujero) y Plataformas
+            platforms[(*platformCount)++] = (Platform){ { 0, groundY, SCREEN_W, 40 }, false, {0}, 0, 0, {0} };
+            platforms[(*platformCount)++] = (Platform){ { 0, 0, 200, 40 }, false, {0}, 0, 0, {0} };       
+            platforms[(*platformCount)++] = (Platform){ { 350, 0, SCREEN_W-350, 40 }, false, {0}, 0, 0, {0} }; 
+            
+            // Plataformas para acceder al techo
+            platforms[(*platformCount)++] = (Platform){ { 100, 400, 100, 20 }, false, {0}, 0, 0, {0} }; // Peldaño 1
+            platforms[(*platformCount)++] = (Platform){ { 300, 300, 100, 20 }, false, {0}, 0, 0, {0} }; // Peldaño 2
+            
+            // Plataforma Móvil para desafío
+            platforms[(*platformCount)++] = (Platform){ { 500, 350, 100, 20 }, true, {-1.0f, 0.0f}, 250.0f, 120.0f, {500.0f, 350.0f} }; 
+
+            // Monedas (4 monedas para más desafío)
+            coins[(*coinCount)++] = (Coin){ { 150.0f, 400.0f - coinOffset }, false }; // Sobre Peldaño 1
+            coins[(*coinCount)++] = (Coin){ { 550.0f, 350.0f - coinOffset }, false }; // Sobre plataforma móvil
+            coins[(*coinCount)++] = (Coin){ { 350.0f, 300.0f - coinOffset }, false }; // Sobre Peldaño 2
+            coins[(*coinCount)++] = (Coin){ { 275.0f, ceilingY + DOOR_H + coinOffset }, false }; // Cerca de la puerta (arriba)
+
+            // Slimes (AÑADIDO UN SLIME EXTRA, total 2)
+            slimes[(*slimeCount)++] = (Slime){ { 100, groundY - SLIME_SIZE_H, SLIME_SIZE_W, SLIME_SIZE_H }, SLIME_PURPLE, 75.0f, {100.0f, groundY - SLIME_SIZE_H}, 150.0f, 1, true };
+            slimes[(*slimeCount)++] = (Slime){ { 700, groundY - SLIME_SIZE_H, SLIME_SIZE_W, SLIME_SIZE_H }, SLIME_PURPLE, 95.0f, {700.0f, groundY - SLIME_SIZE_H}, 120.0f, -1, true };
+            
+            break;
+            
+        case 3: 
+            player->x = 50.0f;
+            player->y = groundY - PLAYER_SIZE_H - 40.0f;
+            
+            door->rect = (Rectangle){ 850, groundY - 40 - DOOR_H, DOOR_W, DOOR_H };
+            
+            // Suelo 
+            platforms[(*platformCount)++] = (Platform){ { 0, groundY, 300, 40 }, false, {0}, 0, 0, {0} };
+            platforms[(*platformCount)++] = (Platform){ { 400, groundY, SCREEN_W - 400, 40 }, false, {0}, 0, 0, {0} };
+
+            // Techo 
+            platforms[(*platformCount)++] = (Platform){ { 0, 0, 450, 40 }, false, {0}, 0, 0, {0} }; 
+            platforms[(*platformCount)++] = (Platform){ { 550, 0, SCREEN_W - 550, 40 }, false, {0}, 0, 0, {0} }; 
+            
+            // Plataformas INTERMEDIAS
+            platforms[(*platformCount)++] = (Platform){ { 200, 400, 100, 20 }, false, {0}, 0, 0, {0} }; 
+            platforms[(*platformCount)++] = (Platform){ { 400, 300, 100, 20 }, false, {0}, 0, 0, {0} }; 
+            platforms[(*platformCount)++] = (Platform){ { 600, 200, 100, 20 }, false, {0}, 0, 0, {0} }; 
+            
+            // Plataforma Móvil
+            platforms[(*platformCount)++] = (Platform){ { 100, 100, 100, 20 }, true, {1.0f, 0.0f}, 250.0f, 80.0f, {100.0f, 100.0f} }; 
+            
+            // Monedas 
+            coins[(*coinCount)++] = (Coin){ { 250.0f, 400.0f - coinOffset }, false }; 
+            coins[(*coinCount)++] = (Coin){ { 450.0f, 300.0f - coinOffset }, false }; 
+            coins[(*coinCount)++] = (Coin){ { 650.0f, 200.0f - coinOffset }, false }; 
+            coins[(*coinCount)++] = (Coin){ { 750.0f, 100.0f - coinOffset }, false }; 
+
+            // Slimes (SIN TRAMPAS)
+            slimes[(*slimeCount)++] = (Slime){ { 100, groundY - SLIME_SIZE_H, SLIME_SIZE_W, SLIME_SIZE_H }, SLIME_PURPLE, 80.0f, {100.0f, groundY - SLIME_SIZE_H}, 180.0f, 1, true };
+            slimes[(*slimeCount)++] = (Slime){ { 700, groundY - SLIME_SIZE_H, SLIME_SIZE_W, SLIME_SIZE_H }, SLIME_PURPLE, 90.0f, {700.0f, groundY - SLIME_SIZE_H}, 150.0f, -1, true };
+            slimes[(*slimeCount)++] = (Slime){ { 500, ceilingY, SLIME_SIZE_W, SLIME_SIZE_H }, SLIME_PURPLE, 100.0f, {500.0f, ceilingY}, 300.0f, 1, true };
+            
+            break;
+
+        default:
+            break;
+    }
+}
+
+
+// ---------------------------------------------------------------------------
+//                                   MAIN
+// ---------------------------------------------------------------------------
+int main(void)
+{
+    InitWindow(SCREEN_W, SCREEN_H, "Gravity Shift Platformer");
+    LoadAssets(); 
+
+    SetTargetFPS(FPS);
+
+    GameState gamestate = MENU;
+
+    Rectangle player = { 100, 100, PLAYER_SIZE_W, PLAYER_SIZE_H };
+    float velY = 0.0f;
+    float gravity = 600.0f;
+
+    Platform platforms[MAX_PLATFORMS];
+    Coin coins[MAX_COINS];
+    // Trap traps[MAX_TRAPS]; // ELIMINADO
+    Slime slimes[MAX_SLIMES];
+
+    int platformCount = 0;
+    int coinCount = 0;
+    // int trapCount = 0; // ELIMINADO
+    int slimeCount = 0;
+    
+    isGravityInverted = false;
+
+    LoadLevel(currentLevel, &player, &velY,
+              platforms, &platformCount,
+              coins, &coinCount,
+              // traps, &trapCount, // ELIMINADO
+              slimes, &slimeCount,
+              &levelDoor);
+
+    while (!WindowShouldClose())
+    {
         float dt = GetFrameTime();
 
-        if (state == GAME_MENU) {
+        switch (gamestate)
+        {
+        case MENU:
             if (IsKeyPressed(KEY_ENTER)) {
-                state = GAME_PLAYING;
-                currentLevel = 0;
-                ResetPlayer(&player, levels[currentLevel]);
+                gamestate = PLAYING;
             }
-        }
-        else if (state == GAME_PLAYING) {
-            if (IsKeyPressed(KEY_R)) {
-                ResetPlayer(&player, levels[currentLevel]);
-            }
+            break;
 
-            // Movimiento
-            float move = 0.0f;
-            if (IsKeyDown(KEY_A)) move -= 1.0f;
-            if (IsKeyDown(KEY_D)) move += 1.0f;
-            player.velocity.x = move * moveSpeed;
+        case PLAYING:
+        { 
+            float moveSpeed = 200.0f; 
+            if (IsKeyDown(KEY_LEFT))  player.x -= moveSpeed * dt;
+            if (IsKeyDown(KEY_RIGHT)) player.x += moveSpeed * dt;
 
-            // Invertir gravedad solo si está en superficie
-            if (IsKeyPressed(KEY_F) && player.onGround) {
-                player.gravityDir *= -1;
-                player.velocity.y = 0;
-                player.onGround   = false;
-            }
+            bool onGround = !isGravityInverted ?
+                IsTouchingSurface(player, platforms, platformCount, false) :
+                IsTouchingSurface(player, platforms, platformCount, true);
 
-            // Física y plataformas
-            ResolveCollisions(&player, levels[currentLevel], dt, gravity);
-
-            // Caer fuera de pantalla = muerte
-            if (player.position.y > screenHeight + 80 ||
-                player.position.y < -80) {
-                ResetPlayer(&player, levels[currentLevel]);
+            // ----------- Salto -----------
+            if (onGround && IsKeyPressed(KEY_SPACE))
+            {
+                velY = isGravityInverted ?  -350.0f : 350.0f; 
+                velY *= -1.0f; 
+                PlaySound(fxJump);
             }
 
-            Rectangle playerRect = GetPlayerRect(player);
+            // ----------- Cambio de gravedad (SOLO EN EL PISO) -----------
+            if (onGround && IsKeyPressed(KEY_UP))
+                isGravityInverted = !isGravityInverted;
 
-            // Colisión con pinchos = muerte
-            for (int i = 0; i < levels[currentLevel].spikeCount; i++) {
-                if (CheckCollisionRecs(playerRect, levels[currentLevel].spikes[i].rect)) {
-                    ResetPlayer(&player, levels[currentLevel]);
-                    break;
+            // ----------- Física vertical -----------
+            velY += (isGravityInverted ? -gravity : gravity) * dt;
+            player.y += velY * dt;
+
+            ResolveVerticalCollisions(&player, &velY, platforms, platformCount, isGravityInverted);
+            ResolveHorizontalCollisions(&player, platforms, platformCount);
+            
+            if (player.x < 0) player.x = 0;
+            if (player.x + player.width > SCREEN_W) player.x = SCREEN_W - player.width;
+
+            UpdatePlatforms(platforms, platformCount, dt);
+            UpdateSlimes(slimes, slimeCount, dt);
+
+            CheckCoinCollection(player, coins, coinCount, &score);
+
+            // ----------- Colisiones mortales -----------
+            // if (CheckTrapCollision(player, traps, trapCount) || // ELIMINADO
+            if (CheckSlimeCollision(player, slimes, slimeCount))
+            {
+                PlaySound(fxHurt);
+                gamestate = GAMEOVER;
+            }
+
+            // ----------- Game Over por volar fuera de límites -----------
+            if (isGravityInverted && player.y + player.height < 0 || 
+                !isGravityInverted && player.y > SCREEN_H)          
+            {
+                 PlaySound(fxHurt);
+                 gamestate = GAMEOVER;
+            }
+            
+            // ----------- Lógica de la Puerta y Fin del Nivel -----------
+            bool allCollected = true;
+            for (int i = 0; i < coinCount; i++)
+                if (!coins[i].collected) allCollected = false;
+            
+            if (allCollected) levelDoor.isLocked = false;
+
+            if (!levelDoor.isLocked && CheckCollisionRectEx(player, levelDoor.rect))
+            {
+                currentLevel++;
+                if (currentLevel > MAX_LEVELS) gamestate = VICTORY;
+                else {
+                    LoadLevel(currentLevel, &player, &velY,
+                              platforms, &platformCount,
+                              coins, &coinCount,
+                              // traps, &trapCount, // ELIMINADO
+                              slimes, &slimeCount,
+                              &levelDoor);
                 }
             }
+        } 
+        break;
 
-            // Meta
-            playerRect = GetPlayerRect(player);
-            if (CheckCollisionRecs(playerRect, levels[currentLevel].goal)) {
-                if (currentLevel < 2) {
-                    currentLevel++;
-                    ResetPlayer(&player, levels[currentLevel]);
-                } else {
-                    state = GAME_VICTORY;
-                }
+        case GAMEOVER:
+            if (IsKeyPressed(KEY_ENTER))
+            {
+                currentLevel = 1;
+                score = 0;
+                isGravityInverted = false; 
+                LoadLevel(currentLevel, &player, &velY, platforms, &platformCount, coins, &coinCount, slimes, &slimeCount, &levelDoor);
+                gamestate = PLAYING;
             }
-        }
-        else if (state == GAME_VICTORY) {
-            if (IsKeyPressed(KEY_ENTER)) {
-                state = GAME_PLAYING;
-                currentLevel = 0;
-                ResetPlayer(&player, levels[currentLevel]);
+            break;
+
+        case VICTORY:
+            if (IsKeyPressed(KEY_ENTER))
+            {
+                currentLevel = 1;
+                score = 0;
+                isGravityInverted = false; 
+                LoadLevel(currentLevel, &player, &velY, platforms, &platformCount, coins, &coinCount, slimes, &slimeCount, &levelDoor);
+                gamestate = MENU;
             }
+            break;
         }
 
-        // ---------- DIBUJO ----------
+        // -------------------------------------------------------------------
+        //                               DRAW 
+        // -------------------------------------------------------------------
         BeginDrawing();
-        ClearBackground((Color){25, 25, 40, 255});
-
-        if (state == GAME_MENU) {
-            DrawText("GRAVITY SHIFT", 230, 110, 40, YELLOW);
-            DrawText("3 niveles con pinchos y gravedad invertible", 150, 160, 20, RAYWHITE);
-            DrawText("Controles:", 150, 210, 22, RAYWHITE);
-            DrawText("A / D  - mover", 170, 240, 20, RAYWHITE);
-            DrawText("F      - invertir gravedad (tocando suelo/techo)", 170, 270, 20, RAYWHITE);
-            DrawText("R      - reiniciar nivel", 170, 300, 20, RAYWHITE);
-            DrawText("ENTER  - empezar", 170, 330, 20, GREEN);
+        ClearBackground((Color){135, 206, 235, 255}); // AZUL CIELO
+        
+        int fontSize = 20; 
+        int victoryFontSize = 60; 
+        
+        // --- Cálculo de si la puerta está desbloqueada para mostrar el mensaje ---
+        bool allCoinsCollected = true;
+        if (gamestate == PLAYING) {
+            for (int i = 0; i < coinCount; i++)
+                if (!coins[i].collected) allCoinsCollected = false;
         }
-        else if (state == GAME_PLAYING) {
-            Level *lvl = &levels[currentLevel];
 
-            // Plataformas
-            for (int i = 0; i < lvl->platformCount; i++) {
-                DrawRectangleRec(lvl->platforms[i].rect,
-                                 (Color){90, 90, 140, 255});
+        switch (gamestate)
+        {
+        case MENU:
+            DrawTextEx(gameFont, "GRAVITY SHIFT PLATFORMER", (Vector2){SCREEN_W/2 - MeasureTextEx(gameFont, "GRAVITY SHIFT PLATFORMER", fontSize, 0).x/2, SCREEN_H/2 - 40}, fontSize, 0, RAYWHITE);
+            DrawTextEx(gameFont, "Presiona ENTER para comenzar", (Vector2){SCREEN_W/2 - MeasureTextEx(gameFont, "Presiona ENTER para comenzar", fontSize, 0).x/2, SCREEN_H/2 + 20}, fontSize, 0, GRAY);
+            break;
+
+        case PLAYING:
+        { 
+            // Dibujar plataformas (CORRECCIÓN DE ESTIRAMIENTO)
+            Rectangle sourcePlat = { 0, 0, PLATFORM_TILE_W, PLATFORM_TILE_H }; 
+            for (int i = 0; i < platformCount; i++)
+            {
+                int numTiles = (int)ceilf(platforms[i].rect.width / PLATFORM_TILE_W);
+                for (int j = 0; j < numTiles; j++)
+                {
+                    Rectangle dest = { platforms[i].rect.x + j * PLATFORM_TILE_W, 
+                                       platforms[i].rect.y, 
+                                       PLATFORM_TILE_W, 
+                                       platforms[i].rect.height };
+
+                    if (dest.x + dest.width > platforms[i].rect.x + platforms[i].rect.width)
+                    {
+                        sourcePlat.width = platforms[i].rect.x + platforms[i].rect.width - dest.x;
+                        dest.width = sourcePlat.width;
+                    } else {
+                        sourcePlat.width = PLATFORM_TILE_W;
+                    }
+                    
+                    DrawTexturePro(texPlatforms, sourcePlat, dest, (Vector2){0}, 0.0f, WHITE);
+                }
+                sourcePlat.width = PLATFORM_TILE_W; 
             }
 
-            // Pinchos (rectángulos rojos)
-            for (int i = 0; i < lvl->spikeCount; i++) {
-                DrawRectangleRec(lvl->spikes[i].rect, (Color){200, 40, 40, 255});
+            // Dibujar monedas
+            for (int i = 0; i < coinCount; i++) {
+                if (!coins[i].collected) {
+                    Vector2 coinDrawPos = { coins[i].center.x - COIN_SIZE / 2, coins[i].center.y - COIN_SIZE / 2 };
+                    DrawTextureRec(texCoin, texRecCoin, coinDrawPos, WHITE); 
+                }
             }
+            
+            // Dibujar slimes Púrpura (ESCALADOS)
+            for (int i = 0; i < slimeCount; i++)
+                if (slimes[i].isActive)
+                    DrawTexturePro(texSlimePurple, texRecSlimePurple, slimes[i].rect, (Vector2){0}, 0.0f, WHITE);
 
-            // Meta
-            DrawRectangleRec(lvl->goal, (Color){0, 200, 0, 255});
 
-            // Jugador
-            Rectangle playerRect = GetPlayerRect(player);
-            DrawRectangleRec(playerRect, (Color){230, 230, 50, 255});
+            // Dibujar jugador (ESCALADO)
+            DrawTexturePro(texKnight, texRecPlayer, player, (Vector2){0}, 0.0f, WHITE);
+            
+            // Dibujar Puerta (cerrada o abierta)
+            Rectangle doorSource = levelDoor.isLocked ? (Rectangle){0, 0, 32, 48} : (Rectangle){32, 0, 32, 48}; 
+            DrawTexturePro(texDoor, doorSource, levelDoor.rect, (Vector2){0}, 0.0f, WHITE);
 
-            DrawText(TextFormat("Nivel %d/3", currentLevel + 1), 10, 10, 20, RAYWHITE);
-            DrawText("A/D: mover   F: invertir gravedad (tocando superficie)   R: reiniciar   ESC: salir",
-                     10, screenHeight - 30, 16, RAYWHITE);
-        }
-        else if (state == GAME_VICTORY) {
-            DrawText("¡HAS COMPLETADO LOS 3 NIVELES!", 140, 180, 26, YELLOW);
-            DrawText("Cuidado con los pinchos ;)", 220, 220, 20, RAYWHITE);
-            DrawText("Presiona ENTER para jugar otra vez o ESC para salir.",
-                     140, 260, 20, RAYWHITE);
+            // --- HUD y MENSAJE DE PUERTA ---
+            DrawTextEx(gameFont, TextFormat("Nivel: %d/%d", currentLevel, MAX_LEVELS), (Vector2){10, 10}, fontSize, 0, RAYWHITE);
+            DrawTextEx(gameFont, TextFormat("Puntaje: %d/%d", score, coinCount), (Vector2){10, 35}, fontSize, 0, RAYWHITE);
+            DrawTextEx(gameFont, isGravityInverted ? "Gravedad: Arriba (UP)" : "Gravedad: Abajo (UP)", (Vector2){10, 60}, fontSize, 0, RAYWHITE);
+            
+            // Mensaje de Desbloqueo de Puerta
+            if (allCoinsCollected) {
+                const char *msg = "¡PUERTA DESBLOQUEADA! Adelante (->)";
+                float msgW = MeasureTextEx(gameFont, msg, fontSize, 0).x;
+                DrawTextEx(gameFont, msg, (Vector2){SCREEN_W/2 - msgW/2, 90}, fontSize, 0, GREEN);
+            }
+            
+        } 
+        break;
+
+        case GAMEOVER:
+            DrawTextEx(gameFont, "GAME OVER", (Vector2){SCREEN_W/2 - MeasureTextEx(gameFont, "GAME OVER", 40, 0).x/2, SCREEN_H/2 - 40}, 40, 0, RED);
+            DrawTextEx(gameFont, TextFormat("Puntaje Final: %d", score), (Vector2){SCREEN_W/2 - MeasureTextEx(gameFont, TextFormat("Puntaje Final: %d", score), fontSize, 0).x/2, SCREEN_H/2 + 70}, fontSize, 0, RAYWHITE);
+            DrawTextEx(gameFont, "Presiona ENTER para reiniciar", (Vector2){SCREEN_W/2 - MeasureTextEx(gameFont, "Presiona ENTER para reiniciar", fontSize, 0).x/2, SCREEN_H/2 + 20}, fontSize, 0, GRAY);
+            break;
+
+        case VICTORY:
+            // "GANASTE" más grande
+            DrawTextEx(gameFont, "GANASTE", (Vector2){SCREEN_W/2 - MeasureTextEx(gameFont, "GANASTE", victoryFontSize, 0).x/2, SCREEN_H/2 - 40}, victoryFontSize, 0, GREEN);
+            DrawTextEx(gameFont, TextFormat("Puntaje Final: %d", score), (Vector2){SCREEN_W/2 - MeasureTextEx(gameFont, TextFormat("Puntaje Final: %d", score), fontSize, 0).x/2, SCREEN_H/2 + 70}, fontSize, 0, RAYWHITE);
+            DrawTextEx(gameFont, "Presiona ENTER para volver al menu", (Vector2){SCREEN_W/2 - MeasureTextEx(gameFont, "Presiona ENTER para volver al menu", fontSize, 0).x/2, SCREEN_H/2 + 20}, fontSize, 0, GRAY);
+            break;
         }
 
         EndDrawing();
     }
 
+    UnloadAssets();
     CloseWindow();
     return 0;
 }
